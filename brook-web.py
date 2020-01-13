@@ -1,25 +1,26 @@
-#coding=utf-8
-#。—————————————————————————————————————————— 
-#。                                           
-#。  brook-web.py                               
-#。                                           
-#。 @Time    : 18-10-27 下午4:09                
-#。 @Author  : capton                        
-#。 @Software: PyCharm                
-#。 @Blog    : http://ccapton.cn              
-#。 @Github  : https://github.com/ccapton     
-#。 @Email   : chenweibin1125@foxmail.com     
-#。__________________________________________
-from __future__ import print_function  #  同时兼容python2、Python3
-from __future__ import division        #  同时兼容python2、Python3
+# coding=utf-8
+# 。——————————————————————————————————————————
+# 。
+# 。  brook-web.py
+# 。
+# 。 @Time    : 18-10-27 下午4:09
+# 。 @Author  : capton
+# 。 @Software: PyCharm
+# 。 @Blog    : http://ccapton.cn
+# 。 @Github  : https://github.com/ccapton
+# 。 @Email   : chenweibin1125@foxmail.com
+# 。__________________________________________
+from __future__ import print_function  # 同时兼容python2、Python3
+from __future__ import division  # 同时兼容python2、Python3
 
-from flask import Flask,render_template,send_from_directory
+from flask import Flask, render_template, send_from_directory, request
 from flask_apscheduler import APScheduler
 from flask_restful import Api
-from flask_restful import Resource,reqparse
+from flask_restful import Resource, reqparse
 import json, os, re, sys
 from qr import *
-from iptables import release_port,refuse_port
+from iptables import release_port, refuse_port
+
 
 # 判断当前Python执行大版本
 python_version = sys.version
@@ -44,6 +45,9 @@ SERVICE_TYPE_BROOK = 0
 SERVICE_TYPE_SS = 1
 SERVICE_TYPE_SOCKS5 = 2
 
+salt = 'brook-web'
+split_word = '---YnJvb2std2Vi---'
+
 
 # Resource封装类，简化数据参数的配置
 class BaseResource(Resource):
@@ -57,21 +61,29 @@ class BaseResource(Resource):
     def add_args(self):
         pass
 
-    def add_argument(self,*args,**kwargs):
-        self.parser.add_argument(*args,**kwargs)
+    def add_argument(self, *args, **kwargs):
+        self.parser.add_argument(*args, **kwargs)
 
     def create_args(self):
         self.args = self.parser.parse_args()
 
-    def get_arg(self,key):
+    def get_arg(self, key):
         return self.args[key]
 
 
 app = Flask(__name__)
 api = Api(app)
 default_port = 5000
-debug = True
 
+from conf import config
+
+app.config.from_object(config)
+
+from models import db
+
+db.init_app(app)
+
+from models.system_user import SystemUser
 
 # 默认服务信息（随机端口）
 def default_config_json():
@@ -83,13 +95,8 @@ def default_config_json():
         random_port2 = random.randint(10000, 30000)
     while random_port3 == random_port2 or random_port == random_port2:
         random_port3 = random.randint(10000, 30000)
-    # init_config_json = {
-    #     'brook': [{'port': random_port, 'psw': str(random_port), 'state': 0}],
-    #     'shadowsocks': [{'port': random_port2, 'psw': str(random_port2), 'state': 0}],
-    #     'socks5': [{'port': random_port3, 'psw': '', 'username': '', 'state': 0}],
-    # }
     init_config_json = {
-        'brook': [{'port':6666, 'psw': '6666', 'state': 0,'info':'若无法开启,删除后再添加'}],
+        'brook': [{'port': 6666, 'psw': '6666', 'state': 0, 'info': '若无法开启,删除后再添加'}],
         'shadowsocks': [],
         'socks5': [],
     }
@@ -97,36 +104,38 @@ def default_config_json():
 
 
 # 默认用户信息
-def default_user(username="admin", password="admin"):
-    return {"user":{"username": username, "password": password}}
+def default_user(username="admin", password="admin", email=''):
+    return {"username": username, "password": password, 'email': email}
 
 
 # 当前服务实时状态对象
-current_brook_state={}
-
+current_brook_state = {}
 
 import sys
-# 用户信息保存路径
-default_userjson_path = os.path.join(sys.path[0],"static/json/user.json")
+from flask import jsonify
+
+# # 用户信息保存路径
+# default_userjson_path = os.path.join(sys.path[0], "static/json/user.json")
 # 服务信息配置保存路径
-config_json_path = os.path.join(sys.path[0],"static/json/brook_state.json")
+config_json_path = os.path.join(sys.path[0], "static/json/brook_state.json")
 
 
 # 基类json对象格式输出函数
-def base_result(msg="", data=None, code=-1):
-    return {"msg": msg, "data": data, "code": code}
+def base_result(msg="", data=None, code=0):
+    return jsonify({"msg": msg, "data": data, "code": code})
+
 
 # 读取json文件，若没有对应文件则创建一个json文件、写入myjson的内容
-def load_json(path,myjson):
+def load_json(path, myjson):
     if not os.path.exists(path):
         os.system("touch %s" % path)
-    f = open(path,'r')
+    f = open(path, 'r')
     json_str = f.read()
     f.close()
     if json_str == '':
         with open(path, 'w') as f2:
-            f2.write(json.dumps(myjson,ensure_ascii=False))
-    f = open(path,'r')
+            f2.write(json.dumps(myjson, ensure_ascii=False))
+    f = open(path, 'r')
     json_str = f.read()
     config_json = json.loads(json_str)
     f.close()
@@ -135,24 +144,43 @@ def load_json(path,myjson):
 
 # 读取服务配置信息
 def load_config_json():
-    return load_json( config_json_path, default_config_json() )
+    return load_json(config_json_path, default_config_json())
 
 
 # 读取用户信息
 def load_default_userjson():
-    return load_json( default_userjson_path, default_user() )
+    user = None
+    try:
+        user = SystemUser.query.first()
+    except Exception as e:
+        print(e)
+    if user:
+        return {'username': user.username, 'password': user.password, 'email': user.email}
+    else:
+        return {'username': 'admin', 'password': 'admin', 'email': ''}
 
 
 # 保存当前用户信息
 def save_userjson(userjson):
-    with open(default_userjson_path,'w') as f:
-        f.write(json.dumps(userjson,ensure_ascii=False))
+    try:
+        user = SystemUser.query.first()
+        if user:
+            user.username = userjson.get('username')
+            user.password = userjson.get('password')
+            user.email = userjson.get('email')
+        else:
+            user = SystemUser(username=userjson.get('username'), password=userjson.get('password'), email=userjson.get('email'))
+            db.session.add(user)
+        db.session.commit()
+    except Exception as e:
+        print(e)
+        db.session.rollback()
 
 
 # 保存当前服务配置
 def save_config_json(config_json):
-    with open(config_json_path,'w') as f:
-        f.write(json.dumps(config_json,ensure_ascii=False))
+    with open(config_json_path, 'w') as f:
+        f.write(json.dumps(config_json, ensure_ascii=False))
 
 
 # 输出ico文件
@@ -161,61 +189,85 @@ class Favicon(BaseResource):
         return send_from_directory(os.path.join(app.root_path, 'static'), 'favicon.ico',
                                    mimetype='image/vnd.microsoft.icon')
 
+
+def check_base64_data(is_get_service_state=False, is_post=True):
+    client_data = request.json.get('data') if request.json and request.json.get('data') else (request.form.get('data') if is_post else request.args.get('data'))
+    data = base64decode(client_data, python_version)
+    client_salt, raw_data = str(data).split(split_word)
+    return (base64decode(client_salt, python_version) == salt and base64decode(raw_data, python_version) == salt)\
+        if is_get_service_state else base64decode(client_salt, python_version) == salt
+
+
+def get_base64_data(key, is_post=True):
+    client_data = request.json.get(key) if request.json and request.json.get(key) else (
+        request.form.get(key) if is_post else request.args.get(key))
+    data = base64decode(client_data, python_version)
+    client_salt, raw_data = str(data).split(split_word)
+    if base64decode(client_salt, python_version) == salt:
+        return base64decode(raw_data, python_version) if raw_data and len(raw_data) > 0 else ''
+
+
 # 登录api
 class Login(BaseResource):
     def add_args(self):
         self.add_argument('username', type=str, help='Username')
         self.add_argument('password', type=str, help='Password')
 
-    def login(self):
-        username = self.get_arg('username')
-        password = self.get_arg('password')
-        name = load_default_userjson()['user']['username']
-        psw = load_default_userjson()['user']['password']
+    def login(self, is_post):
+        username = get_base64_data('username', is_post)
+        password = get_base64_data('password', is_post)
+        user = load_default_userjson()
+        name = user['username']
+        psw = user['password']
         if name == username and psw == password:
             return base_result(msg="Login Successful!", code=0)
-        return base_result(msg="Login failed!")
+        return base_result(msg="Login failed!", code=-1)
 
     def post(self):
-        return self.login()
+        return self.login(True)
 
     def get(self):
-        return self.login()
+        return self.login(False)
+
 
 # 重置用户信息api
 class ResetPsw(BaseResource):
+
     def add_args(self):
-        self.add_argument('old_username',type=str,help='Old Username')
-        self.add_argument('old_password',type=str,help='Old Password')
-        self.add_argument('username',type=str,help='New Username')
-        self.add_argument('password',type=str,help='New Password')
+        self.add_argument('old_username', type=str, help='Old Username')
+        self.add_argument('old_password', type=str, help='Old Password')
+        self.add_argument('username', type=str, help='New Username')
+        self.add_argument('password', type=str, help='New Password')
+
     #
     # code : 1 新用户名为空
     # code : 2 新密码名为空
     # code : -1 旧用户信息不正确
     #
-    def reset_psw(self):
-        username = self.get_arg('username')
-        password = self.get_arg('password')
-        old_username = self.get_arg('old_username')
-        old_password = self.get_arg('old_password')
+    def reset_psw(self, is_post):
+        username = get_base64_data('username', is_post)
+        password = get_base64_data('password', is_post)
+        old_username = base64decode(base64decode(get_base64_data('old_username', is_post), python_version).split(split_word)[1], python_version)
+        old_password = base64decode(base64decode(get_base64_data('old_password', is_post), python_version).split(split_word)[1], python_version)
         code = 0
-        if old_username == load_default_userjson()['user']['username'] and old_password == load_default_userjson()['user']['password']:
+        user = load_default_userjson()
+        if old_username == user['username'] and old_password == user['password']:
             if len(username) <= 0:
                 code = 1
                 return base_result(msg='Reset User Failed!', code=code)
             if len(password) <= 0:
                 code = 2
                 return base_result(msg='Reset User Failed!', code=code)
-            save_userjson(default_user(username=username,password=password))
-            return base_result(msg='Reset User Successful!',code=code)
+            save_userjson(default_user(username=username, password=password))
+            return base_result(msg='Reset User Successful!', code=code)
         return base_result(msg='Reset User Failed!')
 
     def post(self):
-        return self.reset_psw()
+        return self.reset_psw(True)
 
     def get(self):
-        return self.reset_psw()
+        return self.reset_psw(False)
+
 
 # 开启服务api
 # code : 3 服务开启失败
@@ -224,20 +276,18 @@ class ResetPsw(BaseResource):
 #
 class StartService(BaseResource):
     def add_args(self):
-        self.add_argument('username', type=str, help='Username')
-        self.add_argument('password', type=str, help='Password')
-        self.add_argument('type', type=int, help='Service Type')
-        self.add_argument('port', type=int, help='Port')
+        pass
 
-    def start_service(self):
-        username = self.get_arg('username')
-        password = self.get_arg('password')
-        if username != load_default_userjson()['user']['username'] or password != load_default_userjson()['user']['password']:
+    def start_service(self, is_post):
+        username = get_base64_data('username', is_post)
+        password = get_base64_data('password', is_post)
+        user = load_default_userjson()
+        if username != user['username'] or password != user['password']:
             return base_result(msg='Loin Failed')
-        type = self.get_arg('type')
-        port = self.get_arg('port')
+        type = int(get_base64_data('type', is_post))
+        port = int(get_base64_data('port', is_post))
         if busy:
-            return base_result(msg='Server Busy!,Try Again Later.',code=4)
+            return base_result(msg='Server Busy!,Try Again Later.', code=4)
 
         if type == -1:
             stop_service(SERVICE_TYPE_BROOK)
@@ -246,8 +296,8 @@ class StartService(BaseResource):
             result2 = start_service(SERVICE_TYPE_SS)
             stop_service(SERVICE_TYPE_SOCKS5)
             result3 = start_service(SERVICE_TYPE_SOCKS5)
-            if result1*result2*result3 == 0:
-                return base_result(msg='Start All Services Successful!',code=0)
+            if result1 * result2 * result3 == 0:
+                return base_result(msg='Start All Services Successful!', code=0)
         else:
             if port == -1:
                 if type == SERVICE_TYPE_BROOK:
@@ -265,43 +315,41 @@ class StartService(BaseResource):
                     return base_result(msg='Start Service Successful!', code=0)
             else:
                 if type == SERVICE_TYPE_BROOK:
-                    stop_service(SERVICE_TYPE_BROOK,port)
-                    result = start_service(SERVICE_TYPE_BROOK,port)
+                    stop_service(SERVICE_TYPE_BROOK, port)
+                    result = start_service(SERVICE_TYPE_BROOK, port)
                 elif type == SERVICE_TYPE_SS:
-                    stop_service(SERVICE_TYPE_SS,port)
-                    result = start_service(SERVICE_TYPE_SS,port)
+                    stop_service(SERVICE_TYPE_SS, port)
+                    result = start_service(SERVICE_TYPE_SS, port)
                 elif type == SERVICE_TYPE_SOCKS5:
-                    stop_service(SERVICE_TYPE_SOCKS5,port)
-                    result = start_service(SERVICE_TYPE_SOCKS5,port)
+                    stop_service(SERVICE_TYPE_SOCKS5, port)
+                    result = start_service(SERVICE_TYPE_SOCKS5, port)
                 else:
                     result = -1
                 if result == 0:
                     return base_result(msg='Start Service Successful!', code=0)
 
-        return base_result(msg='Failed to Start Service',code=3)
+        return base_result(msg='Failed to Start Service', code=3)
 
     def get(self):
-        return self.start_service()
+        return self.start_service(False)
 
     def post(self):
-        return self.start_service()
+        return self.start_service(True)
+
 
 # 停止服务api
 class StopService(BaseResource):
     def add_args(self):
-        self.add_argument('username', type=str, help='Username')
-        self.add_argument('password', type=str, help='Password')
-        self.add_argument('type', type=int, help='Service Type')
-        self.add_argument('port', type=int, help='Port')
+        pass
 
-    def stop_service(self):
-        username = self.get_arg('username')
-        password = self.get_arg('password')
-        if username != load_default_userjson()['user']['username'] or password != load_default_userjson()['user'][
-            'password']:
+    def stop_service(self, is_post):
+        username = get_base64_data('username', is_post)
+        password = get_base64_data('password', is_post)
+        if username != load_default_userjson()['username'] or password != load_default_userjson()['password']:
             return base_result(msg='Loin Failed')
-        type = self.get_arg('type')
-        port = self.get_arg('port')
+
+        type = int(get_base64_data('type', is_post))
+        port = int(get_base64_data('port', is_post))
         if type == -1:
             stop_service(SERVICE_TYPE_BROOK)
             stop_service(SERVICE_TYPE_SS)
@@ -309,123 +357,126 @@ class StopService(BaseResource):
         else:
             if port == -1:
                 if type == SERVICE_TYPE_BROOK:
-                    stop_service(SERVICE_TYPE_BROOK,force=True)
+                    stop_service(SERVICE_TYPE_BROOK, force=True)
                 elif type == SERVICE_TYPE_SS:
-                    stop_service(SERVICE_TYPE_SS,force=True)
+                    stop_service(SERVICE_TYPE_SS, force=True)
                 elif type == SERVICE_TYPE_SOCKS5:
-                    stop_service(SERVICE_TYPE_SOCKS5,force=True)
+                    stop_service(SERVICE_TYPE_SOCKS5, force=True)
             else:
                 if type == SERVICE_TYPE_BROOK:
                     stop_service(SERVICE_TYPE_BROOK, port)
-                    start_service(SERVICE_TYPE_BROOK,port=-1)
+                    start_service(SERVICE_TYPE_BROOK, port=-1)
                 elif type == SERVICE_TYPE_SS:
                     stop_service(SERVICE_TYPE_SS, port)
-                    start_service(SERVICE_TYPE_SS,port=-1)
+                    start_service(SERVICE_TYPE_SS, port=-1)
                 elif type == SERVICE_TYPE_SOCKS5:
                     stop_service(SERVICE_TYPE_SOCKS5, port)
-                    start_service(SERVICE_TYPE_SOCKS5,port=-1)
+                    start_service(SERVICE_TYPE_SOCKS5, port=-1)
         return base_result(msg='Stop Service Successful!', code=0)
 
     def get(self):
-        return self.stop_service()
+        return self.stop_service(False)
 
     def post(self):
-        return self.stop_service()
+        return self.stop_service(True)
+
 
 # 获取服务状态api
 class ServiceState(BaseResource):
+
     def add_args(self):
-         pass
+        pass
 
     def service_state(self):
         return current_brook_state
 
     def get(self):
-        return base_result(msg='', code=0, data=self.service_state())
+        if check_base64_data(is_get_service_state=False):
+            return base_result(msg='', code=0, data=base64encode(json.dumps(self.service_state()), python_version))
+        else:
+            return base_result(msg='解密失败', code=1)
 
     def post(self):
-        return base_result(msg='', code=0, data=self.service_state())
+        if check_base64_data(is_get_service_state=True):
+            return base_result(msg='', code=0, data=base64encode(json.dumps(self.service_state()), python_version))
+        else:
+            return base_result(msg='解密失败', code=1)
+
 
 # 增加端口api
 class AddPort(BaseResource):
     def add_args(self):
-        self.add_argument('type',type=int,help='Service Type')
-        self.add_argument('port',type=int,help='Service Port')
-        self.add_argument('password',type=str,help='Service Password')
-        self.add_argument('username',type=str,help='Service Username')
-        self.add_argument('info',type=str,help='Service Info')
+        pass
 
-    def add(self):
-        type = self.get_arg('type')
-        port = self.get_arg('port')
-        password = self.get_arg('password')
-        username = self.get_arg('username')
-        info = self.get_arg('info')
+    def add(self, is_post):
+        type = int(get_base64_data('type', is_post))
+        port = int(get_base64_data('port', is_post))
+        password = get_base64_data('password', is_post)
+        username = get_base64_data('username', is_post)
+        info = get_base64_data('info', is_post)
         if busy:
-            return base_result(msg='Server Busy!,Try Again Later.',code=4)
-        if is_port_used(port,current_brook_state):
-            return base_result(msg='Port has been used!',code=-2)
-        if add_port(service_type=type,port=port,psw=password,username=username,info=info):
-            return base_result(msg='Add Port Successful!',code=0)
-        return base_result(msg='Add Port Failed!',code=-1)
+            return base_result(msg='Server Busy!,Try Again Later.', code=4)
+        if is_port_used(port, current_brook_state):
+            return base_result(msg='Port has been used!', code=-2)
+        if add_port(service_type=type, port=port, psw=password, username=username, info=info):
+            return base_result(msg='Add Port Successful!', code=0)
+        return base_result(msg='Add Port Failed!', code=-1)
 
     def get(self):
-        return self.add()
+        return self.add(False)
 
     def post(self):
-        return self.add()
+        return self.add(True)
+
 
 # 删除端口api
 class DelPort(BaseResource):
     def add_args(self):
-        self.add_argument('type', type=int, help='Service Type')
-        self.add_argument('port', type=int, help='Service Port')
-        self.add_argument('password',type=str,help='Service Password')
+        pass
 
-    def del_port(self):
-        type = self.get_arg('type')
-        port = self.get_arg('port')
-        password = self.get_arg('password')
+    def del_port(self, is_post):
+        type = int(get_base64_data('type', is_post))
+        port = int(get_base64_data('port', is_post))
         if busy:
-            return base_result(msg='Server Busy!,Try Again Later.',code=4)
-        if del_port(service_type=type,port=port):
-            return base_result(msg='Delete Port Successful!',code=0)
-        return base_result(msg='Delete Port Failed!',code=-1)
+            return base_result(msg='Server Busy!,Try Again Later.', code=4)
+        if del_port(service_type=type, port=port):
+            return base_result(msg='Delete Port Successful!', code=0)
+        return base_result(msg='Delete Port Failed!', code=-1)
 
     def get(self):
-        return self.del_port()
+        return self.del_port(False)
 
     def post(self):
-        return self.del_port()
+        return self.del_port(True)
 
 
 # 生成二维码api
 class GenerateQrImg(BaseResource):
-    def add_args(self):
-        self.add_argument('type',type=int,help='Service Type')
-        self.add_argument('ip',type=str,help='Service Ip')
-        self.add_argument('password',type=str,help='Service Password')
-        self.add_argument('port',type=int,help='Service Port')
 
-    def generate_qr_image(self):
-        type = self.get_arg('type')
-        port = self.get_arg('port')
-        password = self.get_arg('password')
-        ip = self.get_arg('ip')
+    def add_args(self):
+        pass
+
+    def generate_qr_image(self, is_post):
+        type = int(get_base64_data('type', is_post))
+        port = int(get_base64_data('port', is_post))
+        password = get_base64_data('password', is_post)
+        ip = get_base64_data('ip', is_post)
         if type == SERVICE_TYPE_SS:
-            if port <= 0 :
-                return base_result(msg='Port must > 0',code=-2)
-            if generate_qr_image(format_ss_link(ip,password,port,python_version),port):
-                return base_result('GenerateQrImg successful!',code=0)
+            if port <= 0:
+                return base_result(msg='Port must > 0', code=-2)
+            if generate_qr_image(format_ss_link(ip, password, port, python_version), port):
+                return base_result('GenerateQrImg successful!', code=0)
         return base_result('GenerateQrImg failed')
+
     def get(self):
-        return self.generate_qr_image()
+        return self.generate_qr_image(False)
+
     def post(self):
-        return self.generate_qr_image()
+        return self.generate_qr_image(True)
 
 
 # 检查目标端口是否被占用、根据配置信息判断端口是否已被记录
-def is_port_used(port,config_json):
+def is_port_used(port, config_json):
     if port > 0:
         brook_list = config_json['brook']
         ss_list = config_json['shadowsocks']
@@ -439,7 +490,7 @@ def is_port_used(port,config_json):
         for socks5 in socks5_list:
             if port == socks5['port']:
                 return True
-        pi = os.popen('lsof -i:'+str(port))
+        pi = os.popen('lsof -i:' + str(port))
         res = pi.read()
         pi.close()
         if res != '':
@@ -448,9 +499,9 @@ def is_port_used(port,config_json):
 
 
 # 增加端口
-def add_port(username,service_type=SERVICE_TYPE_BROOK, port=-1, psw='',info=''):
-    print(service_type,port,psw,username)
-    if port == -1 :
+def add_port(username, service_type=SERVICE_TYPE_BROOK, port=-1, psw='', info=''):
+    print(service_type, port, psw, username)
+    if port == -1:
         return False
     if username != '' and username != None:
         if psw == '' or psw == None:
@@ -458,11 +509,11 @@ def add_port(username,service_type=SERVICE_TYPE_BROOK, port=-1, psw='',info=''):
     config_json = load_config_json()
     new_config_json = config_json
     if service_type == SERVICE_TYPE_BROOK:
-        config_json['brook'].append({'port': port, 'psw': str(psw),'info':info})
+        config_json['brook'].append({'port': port, 'psw': str(psw), 'info': info})
     elif service_type == SERVICE_TYPE_SS:
-        config_json['shadowsocks'].append({'port': port, 'psw': str(psw),'info':info})
+        config_json['shadowsocks'].append({'port': port, 'psw': str(psw), 'info': info})
     elif service_type == SERVICE_TYPE_SOCKS5:
-        config_json['socks5'].append({'port': port, 'psw': str(psw), 'username': str(username),'info':info})
+        config_json['socks5'].append({'port': port, 'psw': str(psw), 'username': str(username), 'info': info})
     global busy
     busy = True
     save_config_json(new_config_json)
@@ -471,16 +522,17 @@ def add_port(username,service_type=SERVICE_TYPE_BROOK, port=-1, psw='',info=''):
         refuse_port([port])
         release_port([port])
     stop_service(service_type=service_type)
-    start_service(service_type=service_type,port=port)
+    start_service(service_type=service_type, port=port)
     return True
 
 
 # 删除端口
-def del_port(service_type=SERVICE_TYPE_BROOK,port=-1):
+def del_port(service_type=SERVICE_TYPE_BROOK, port=-1):
     if port == -1:
         return False
     config_json = load_config_json()
-    service_list = [config_json['brook'],config_json['shadowsocks'],config_json['socks5']]
+    service_list = [config_json['brook'], config_json['shadowsocks'], config_json['socks5']]
+
     def get_index(service):
         index = -1
         for i in range(len(service)):
@@ -488,10 +540,11 @@ def del_port(service_type=SERVICE_TYPE_BROOK,port=-1):
                 index = i
                 break
         return index
+
     try:
         if service_type == SERVICE_TYPE_BROOK:
             index = get_index(service_list[0])
-            if index == -1:return  False
+            if index == -1: return False
             config_json['brook'].remove(config_json['brook'][index])
             global busy
             busy = True
@@ -531,16 +584,16 @@ def get_host_ip():
     except:
         pass
     finally:
-        if s:s.close()
+        if s: s.close()
     return ip
 
 
 # 记录所有服务的状态
 def record_all_state():
-    #print('record_brook_state')
     record_state(SERVICE_TYPE_BROOK)
     record_state(SERVICE_TYPE_SS)
     record_state(SERVICE_TYPE_SOCKS5)
+
 
 # 记录服务状态
 def record_state(service_type=-1):
@@ -563,19 +616,19 @@ def record_state(service_type=-1):
     final_results = []
     for node in all_results:
         final_results.append(int(node[4:]))
-    #print(final_results)
+    # print(final_results)
     config_json = load_config_json()
     global current_brook_state
-    current_brook_state[service_name]=[]
+    current_brook_state[service_name] = []
     # 判断当前服务所有端口的状态，并保存到全局变量current_brook_state中去
     for server in config_json[service_name]:
         current_server = {}
         if service_type == SERVICE_TYPE_BROOK:
-            current_server['link'] = format_brook_link(host_ip,server['psw'],server['port'])
+            current_server['link'] = format_brook_link(host_ip, server['psw'], server['port'])
             current_server['qr_img_path'] = os.path.join('static/img/qr', str(server['port']) + '.png')
         elif service_type == SERVICE_TYPE_SS:
-            current_server['link'] = format_ss_link(host_ip,server['psw'],server['port'],pv=python_version)
-            current_server['qr_img_path'] = os.path.join('static/img/qr',str(server['port'])+'.png')
+            current_server['link'] = format_ss_link(host_ip, server['psw'], server['port'], pv=python_version)
+            current_server['qr_img_path'] = os.path.join('static/img/qr', str(server['port']) + '.png')
         if is_linux():
             current_server['linked_num'] = port_linked_num(server['port'])
         else:
@@ -597,8 +650,9 @@ def record_state(service_type=-1):
             current_server['info'] = ''
         current_brook_state[service_name].append(current_server)
 
+
 # 开启服务
-def start_service(service_type,port=-1,force=False):
+def start_service(service_type, port=-1, force=False):
     service_name = 'brook'
     if service_type == SERVICE_TYPE_BROOK:
         service_name = 'brook'
@@ -662,7 +716,7 @@ def start_service(service_type,port=-1,force=False):
 
 
 # 停止服务
-def stop_service(service_type=SERVICE_TYPE_BROOK,port=-1,force=False):
+def stop_service(service_type=SERVICE_TYPE_BROOK, port=-1, force=False):
     has_service_start(service_type)
     service_name = 'brook'
     if service_type == SERVICE_TYPE_BROOK:
@@ -685,7 +739,7 @@ def stop_service(service_type=SERVICE_TYPE_BROOK,port=-1,force=False):
     save_config_json(config_json)
     busy = False
     try:
-        global brook_pid,ss_pid
+        global brook_pid, ss_pid
         if service_type == SERVICE_TYPE_BROOK:
             if brook_pid != '':
                 os.system('kill ' + brook_pid)
@@ -701,7 +755,7 @@ def stop_service(service_type=SERVICE_TYPE_BROOK,port=-1,force=False):
 
 # 获取端口已连接的ip数量
 def port_linked_num(port):
-    num=0
+    num = 0
     c = "ss state connected sport = :%d -tn|sed '1d'|awk '{print $NF}'|awk -F ':' '{print $(NF-1)}'|sort -u|wc -l" % port
     try:
         pi = os.popen(c)
@@ -718,7 +772,7 @@ def has_service_start(service_type=SERVICE_TYPE_BROOK):
     result = pi.read()
     pi.close()
     try:
-        global brook_pid,ss_pid,socks5_pid
+        global brook_pid, ss_pid, socks5_pid
         if service_type == SERVICE_TYPE_BROOK:
             brook_pid = match_pid(result, service_type)
         elif service_type == SERVICE_TYPE_SS:
@@ -726,24 +780,27 @@ def has_service_start(service_type=SERVICE_TYPE_BROOK):
         elif service_type == SERVICE_TYPE_SOCKS5:
             socks5_pid = match_pid(result, service_type)
     except Exception:
-        if service_type == SERVICE_TYPE_BROOK:brook_pid = ''
-        elif service_type == SERVICE_TYPE_SS:ss_pid = ''
-        elif service_type == SERVICE_TYPE_SOCKS5:socks5_pid = ''
+        if service_type == SERVICE_TYPE_BROOK:
+            brook_pid = ''
+        elif service_type == SERVICE_TYPE_SS:
+            ss_pid = ''
+        elif service_type == SERVICE_TYPE_SOCKS5:
+            socks5_pid = ''
     started = False
     if service_type == SERVICE_TYPE_BROOK:
         if str(result).find(' servers -l') != -1:
-                started = True
+            started = True
     elif service_type == SERVICE_TYPE_SS:
         if str(result).find(' ssservers -l') != -1:
-                started = True
+            started = True
     elif service_type == SERVICE_TYPE_SOCKS5:
         if str(result).find(' socks5 -l') != -1:
-                started = True
+            started = True
     return started
 
 
 # 正则匹配查找对应服务的进程号
-def match_pid(text,service_type=SERVICE_TYPE_BROOK):
+def match_pid(text, service_type=SERVICE_TYPE_BROOK):
     import re
     if service_type == SERVICE_TYPE_BROOK:
         re_result = re.search('.+\s{1}servers -l.+', str(text))
@@ -761,7 +818,7 @@ def match_pid(text,service_type=SERVICE_TYPE_BROOK):
 # 清理后台模式的日志
 def clear_log():
     if os.path.exists('nohup.out'):
-        with open('nohup.out','w') as f:
+        with open('nohup.out', 'w') as f:
             f.write('')
             print('Clear Log')
 
@@ -771,7 +828,7 @@ class Config(object):
         {
             'id': 'job1',
             'func': record_all_state,
-            #'args': (1, 2),
+            # 'args': (1, 2),
             'trigger': 'interval',
             'seconds': 2
         },
@@ -789,41 +846,80 @@ class Config(object):
 #
 # flask-restful的api对象添加路由信息
 #
-api.add_resource(Favicon,'/favicon.ico')
-api.add_resource(Login,'/api/login')
-api.add_resource(ResetPsw,'/api/resetpsw')
-api.add_resource(StartService,'/api/startservice')
-api.add_resource(StopService,'/api/stopservice')
-api.add_resource(ServiceState,'/api/servicestate')
-api.add_resource(AddPort,'/api/addport')
-api.add_resource(DelPort,'/api/delport')
-api.add_resource(GenerateQrImg,'/api/generateqrimg')
+api.add_resource(Favicon, '/favicon.ico')
+api.add_resource(Login, '/api/login')
+api.add_resource(ResetPsw, '/api/resetpsw')
+api.add_resource(StartService, '/api/startservice')
+api.add_resource(StopService, '/api/stopservice')
+api.add_resource(ServiceState, '/api/servicestate')
+api.add_resource(AddPort, '/api/addport')
+api.add_resource(DelPort, '/api/delport')
+api.add_resource(GenerateQrImg, '/api/generateqrimg')
+
+
 
 @app.route("/")
 def brook_web():
-    title='Brook后台管理'
-    return render_template('index.html',title=title)
+    title = 'Brook后台管理'
+    return render_template('index.html', title=title)
+
+
 
 @app.route("/login")
 def user_login():
-    title='Brook管理登录'
-    return render_template('login.html',title=title)
+    title = 'Brook管理登录'
+    return render_template('login.html', title=title)
+
+
 
 @app.route("/user")
 def user_edit():
-    title='Brook后台管理'
-    return render_template('user.html',title=title)
+    title = 'Brook后台管理'
+    return render_template('user.html', title=title)
+
+
 
 @app.route("/test")
 def test_html():
     return render_template('test.html')
 
 
+# @app.route('/create_models', methods=['PUT'])
+# def create_models():
+#     try:
+#         db.create_all()
+#         from models.system_user import SystemUser
+#         if SystemUser.query.count() == 0:
+#             user = SystemUser(username='admin', password='admin')
+#             db.session.add(user)
+#             db.session.commit()
+#         return base_result(msg='创建Models成功!')
+#     except Exception as e:
+#         print(e)
+#         db.session.rollback()
+#         return base_result(msg='创建Models失败' + str(e), code=-1)
+#
+#
+# @app.route('/get_user')
+# def get_user_default():
+#     try:
+#         db.create_all()
+#         from models.system_user import SystemUser
+#         users = SystemUser.query.all()
+#         user_list = []
+#         for user in users:
+#             user_list.append({'username': user.username, 'password': user.password})
+#         return base_result(msg='获取用户成功', data={'users': user_list})
+#     except Exception as e:
+#         print(e)
+#         return base_result(msg='获取用户失败 ' + str(e), code=-1)
+
+
 # 修改默认web端口是否错误的标志
 port_error = False
 
 
-def config_param(port=5000,email='',domain=''):
+def config_param(port=5000, email='', domain=''):
     global default_port, port_error
     if isinstance(port, int):
         if port > 0:
@@ -839,20 +935,6 @@ def config_param(port=5000,email='',domain=''):
     if domain == '':
         return
 
-# command_tag = 'apt'
-# def guest_command_tag():
-#     global command_tag
-#     system_type = ''
-#     content = os.popen('cat /proc/version').read()
-#     if 'debian' in content.lower() or 'ubuntu' in content.lower():
-#         system_type = 'debian'
-#     elif 'centos' in content.lower() or 'red hat' in content.lower() or 'redhat' in content.lower():
-#         system_type = 'centos'
-#     if system_type == 'debian':
-#         command_tag = 'apt-get'
-#     elif system_type == 'centos':
-#         command_tag = 'yum -y'
-# guest_command_tag()
 
 
 # 定时器服务，用于心跳记录当前服务信息
@@ -874,6 +956,7 @@ def is_linux():
         return True
     return False
 
+
 if __name__ == '__main__':
     if python_version == '2':
         reload(sys)  # python3解释器下可能会提示错误，没关系，因为只有python2运行本程序才会走到这步
@@ -887,25 +970,15 @@ if __name__ == '__main__':
 
     host_ip = get_host_ip()
     import fire
+
     fire.Fire(config_param)
 
     if not port_error:
-        # import platform
-        # sys_name = platform.system()
-        # machine_name = platform.machine().lower()
-        # if 'Darwin' == sys_name:
-        #      pass
-        # elif 'Linux' == sys_name:
-        #     p = os.popen(command_tag + ' install psmisc')
-        #     p.read()
-        #     p.close()
-        #
-        # kill_result = os.system('killall brook')
 
         # 记录当前运行中的服务，并停止该服务
-        if has_service_start(SERVICE_TYPE_BROOK):stop_service(SERVICE_TYPE_BROOK,port=-1)
-        if has_service_start(SERVICE_TYPE_SS):stop_service(SERVICE_TYPE_SS,port=-1)
-        if has_service_start(SERVICE_TYPE_SOCKS5):stop_service(SERVICE_TYPE_SOCKS5,port=-1)
+        if has_service_start(SERVICE_TYPE_BROOK): stop_service(SERVICE_TYPE_BROOK, port=-1)
+        if has_service_start(SERVICE_TYPE_SS): stop_service(SERVICE_TYPE_SS, port=-1)
+        if has_service_start(SERVICE_TYPE_SOCKS5): stop_service(SERVICE_TYPE_SOCKS5, port=-1)
 
         if not os.path.exists('brook'):
             print('当前目录下不存在brook程序！请执行 python install-brook.py 后重试')
@@ -914,6 +987,4 @@ if __name__ == '__main__':
             start_service(SERVICE_TYPE_SS)
             start_service(SERVICE_TYPE_SOCKS5)
 
-
-        app.run(host=host_ip, port=default_port, debug=debug)
-
+        app.run(host=host_ip, port=default_port)
